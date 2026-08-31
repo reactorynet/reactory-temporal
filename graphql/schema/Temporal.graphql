@@ -1,0 +1,99 @@
+enum TemporalWorkflowExecutionStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELED
+  TERMINATED
+  CONTINUED_AS_NEW
+  TIMED_OUT
+  UNKNOWN
+}
+
+type TemporalWorkflowExecution {
+  workflowId: String!
+  runId: String!
+  workflowType: String
+  taskQueue: String
+  status: TemporalWorkflowExecutionStatus
+  startTime: String
+  closeTime: String
+  historyLength: Int
+}
+
+input TemporalConnectionConfigInput {
+  address: String
+  namespace: String
+  apiKey: String
+}
+
+input TemporalStartWorkflowInput {
+  workflowType: String!
+  workflowId: String!
+  taskQueue: String!
+  args: [Any]
+  searchAttributes: Any
+  memo: Any
+  cronSchedule: String
+  connectionConfig: TemporalConnectionConfigInput
+}
+
+input TemporalSignalWorkflowInput {
+  workflowId: String!
+  runId: String
+  signalName: String!
+  args: [Any]
+  connectionConfig: TemporalConnectionConfigInput
+}
+
+input TemporalQueryWorkflowInput {
+  workflowId: String!
+  runId: String
+  queryType: String!
+  args: [Any]
+  connectionConfig: TemporalConnectionConfigInput
+}
+
+type TemporalExecutionResult {
+  workflowId: String!
+  runId: String!
+  status: String
+}
+
+extend type Query {
+  """
+  Queries the status and execution metadata of a Temporal workflow
+  """
+  temporalWorkflowStatus(workflowId: String!, runId: String, connectionConfig: TemporalConnectionConfigInput): TemporalWorkflowExecution
+
+  """
+  Executes a read-only query on an active or closed Temporal workflow
+  """
+  temporalQueryWorkflow(input: TemporalQueryWorkflowInput!): Any
+
+  """
+  Tests connection to the configured or default Temporal cluster
+  """
+  temporalPing(connectionConfig: TemporalConnectionConfigInput): Boolean!
+}
+
+extend type Mutation {
+  """
+  Starts a new durable workflow execution on Temporal
+  """
+  temporalStartWorkflow(input: TemporalStartWorkflowInput!): TemporalExecutionResult!
+
+  """
+  Sends an asynchronous signal to a running Temporal workflow
+  """
+  temporalSignalWorkflow(input: TemporalSignalWorkflowInput!): Boolean!
+
+  """
+  Requests cancellation of an active Temporal workflow
+  """
+  temporalCancelWorkflow(workflowId: String!, runId: String, connectionConfig: TemporalConnectionConfigInput): Boolean!
+
+  """
+  Terminates an active Temporal workflow immediately with a reason
+  """
+  temporalTerminateWorkflow(workflowId: String!, reason: String, runId: String, connectionConfig: TemporalConnectionConfigInput): Boolean!
+}
