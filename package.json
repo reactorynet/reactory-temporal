@@ -1,0 +1,18 @@
+{
+  "name": "reactory-temporal",
+  "version": "1.0.0",
+  "description": "Temporal.io integration module for Reactory platform. Provides durable execution client services, workflow bridge macros, signals, and GraphQL orchestration bindings.",
+  "type": "commonjs",
+  "main": "index.ts",
+  "repository": "https://github.com/reactorynet/reactory-temporal",
+  "author": "W. Weber",
+  "license": "MIT",
+  "dependencies": {
+    "@temporalio/client": "^1.11.7",
+    "@temporalio/common": "^1.11.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
