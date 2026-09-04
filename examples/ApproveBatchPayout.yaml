@@ -1,0 +1,82 @@
+# Human-in-the-loop across BOTH engines.
+#
+# Reactory owns the approval experience; Temporal owns the money. The flow:
+#   1. start the Temporal batch (fire-and-forget) — it runs screening + reservation
+#      and then parks on its own `await condition(() => isApproved)`
+#   2. suspend the Reactory instance until an operator approves (a core wait_event —
+#      publish `payout.approval` keyed on the batch id to release it)
+#   3. signal Temporal so its approval gate opens
+#   4. durably await the final outcome
+#
+# Approve with:
+#   mutation { publishWorkflowEvent(eventName: "payout.approval",
+#                                   eventKey: "2026_001",
+#                                   eventData: { approverId: "user_checker_werner" }) { success } }
+nameSpace: reactory-temporal-examples
+name: ApproveBatchPayout
+version: 1.0.0
+description: Maker/checker payout — Reactory holds the approval gate, Temporal executes.
+author: Reactory
+tags: [temporal, approval, human-in-the-loop, example]
+inputs:
+  batchId:
+    type: string
+    required: true
+  accountId:
+    type: string
+    required: true
+  currency:
+    type: string
+    required: false
+    default: GBP
+steps:
+  - id: startPayout
+    name: Start Temporal batch
+    type: temporal_workflow
+    config:
+      workflowType: B2BMassPayoutWorkflow
+      workflowId: "batch_${input.batchId}"
+      taskQueue: b2b-payouts-queue
+      awaitMode: none
+      args:
+        - batchId: "${input.batchId}"
+          accountId: "${input.accountId}"
+          currency: "${input.currency}"
+          rows: "${variables.validatedRows}"
+
+  - id: awaitApproval
+    name: Await checker approval
+    type: wait_event
+    dependsOn: startPayout
+    config:
+      eventName: payout.approval
+      eventKey: "input.batchId"
+      outputVariable: approval
+
+  - id: approveInTemporal
+    name: Release the Temporal approval gate
+    type: temporal_signal
+    dependsOn: awaitApproval
+    config:
+      workflowId: "${steps.startPayout.outputs.workflowId}"
+      signalName: approveBatch
+      args:
+        - "${approval.approverId}"
+
+  - id: awaitSettlement
+    name: Await settlement
+    type: temporal_await
+    dependsOn: approveInTemporal
+    config:
+      workflowId: "${steps.startPayout.outputs.workflowId}"
+      awaitMode: event
+      awaitTimeout: 86400000
+      resultPath: totalSettled
+
+  - id: report
+    name: Report settlement
+    type: log
+    dependsOn: awaitSettlement
+    config:
+      message: "Batch ${input.batchId} settled ${steps.awaitSettlement.outputs.result} payouts (status ${steps.awaitSettlement.outputs.status})"
+      level: info

@@ -97,3 +97,83 @@ extend type Mutation {
   """
   temporalTerminateWorkflow(workflowId: String!, reason: String, runId: String, connectionConfig: TemporalConnectionConfigInput): Boolean!
 }
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# Completion watches — the bridge that wakes suspended Reactory workflow steps
+# ─────────────────────────────────────────────────────────────────────────────────
+
+enum TemporalWatchStatus {
+  """Waiting for the Temporal execution to reach a terminal state."""
+  pending
+  """Terminal outcome recorded; delivery to the waiting step is in progress."""
+  settled
+  """The waiting step is confirmed to have consumed the event."""
+  acked
+  """The await deadline passed before the run settled."""
+  timed_out
+  """Delivery was retried to exhaustion and given up on."""
+  abandoned
+}
+
+type TemporalWorkflowWatch {
+  id: String!
+  workflowId: String!
+  runId: String
+  eventName: String!
+  eventKey: String!
+  status: TemporalWatchStatus!
+  """The Temporal status recorded when the watch settled."""
+  outcomeStatus: String
+  """The Reactory workflow instance waiting on this run."""
+  instanceId: String
+  stepId: String
+  attempts: Int
+  lastError: String
+  awaitDeadline: String
+  createdAt: String
+  settledAt: String
+  ackedAt: String
+}
+
+type TemporalSweepReport {
+  reattached: Int!
+  republished: Int!
+  timedOut: Int!
+  acked: Int!
+  abandoned: Int!
+}
+
+input TemporalWatchFilter {
+  status: TemporalWatchStatus
+  workflowId: String
+  instanceId: String
+  limit: Int
+}
+
+extend type Query {
+  """
+  Outstanding Temporal completion watches for the current partner — which runs the
+  workflow engine is still waiting on, and whether any delivery was abandoned.
+  """
+  temporalWorkflowWatches(filter: TemporalWatchFilter): [TemporalWorkflowWatch]
+}
+
+extend type Mutation {
+  """
+  Publish a Temporal event into the Reactory workflow engine, resuming any step
+  suspended on (eventName, eventKey). eventName must begin with "temporal.".
+  """
+  temporalPublishWorkflowEvent(
+    eventName: String
+    eventKey: String!
+    workflowId: String
+    runId: String
+    data: Any
+  ): Boolean!
+
+  """
+  Run one bridge reconciliation pass immediately (re-attach, re-publish, time out,
+  ack) instead of waiting for the background sweep. Intended for operators.
+  """
+  temporalSweepWatches: TemporalSweepReport!
+}

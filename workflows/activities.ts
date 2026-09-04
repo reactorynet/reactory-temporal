@@ -80,3 +80,62 @@ export async function settleRowActivity(accountId: string, rowId: string, amount
 export async function notifyBatchCompletionActivity(batchId: string, totalSettled: number, totalAmount: number, currency: string): Promise<void> {
   console.log(`[Activity:notifyBatchCompletion] 🔔 Batch ${batchId} settled! Total: ${totalSettled} payouts (${totalAmount} ${currency}). Webhooks dispatched.`);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// Reactory callback activity
+// ─────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Activity: notify a Reactory workflow instance from inside a Temporal workflow.
+ *
+ * Use this to push PROGRESS or intermediate events (approval needed, milestone
+ * reached) into a waiting Reactory YAML workflow. Terminal outcomes do NOT need it:
+ * the TemporalEventBridgeService already watches every run Reactory starts and
+ * publishes the settled event itself.
+ *
+ * It must be an ACTIVITY, never inline workflow code: Temporal replays workflow
+ * functions deterministically, so network I/O inside a workflow is illegal.
+ *
+ * Environment:
+ *   REACTORY_API_URL      e.g. http://localhost:4000  (required)
+ *   REACTORY_CLIENT_KEY   the Reactory client key     (required — global auth)
+ *   REACTORY_CLIENT_PWD   the matching client secret  (required)
+ */
+export async function notifyReactoryActivity(
+  eventName: string,
+  eventKey: string,
+  data?: Record<string, unknown>,
+): Promise<{ accepted: boolean; watchAcked?: boolean }> {
+  const apiUrl = process.env.REACTORY_API_URL;
+  const clientKey = process.env.REACTORY_CLIENT_KEY;
+  const clientPwd = process.env.REACTORY_CLIENT_PWD;
+
+  if (!apiUrl || !clientKey || !clientPwd) {
+    throw new Error(
+      'notifyReactoryActivity requires REACTORY_API_URL, REACTORY_CLIENT_KEY and REACTORY_CLIENT_PWD',
+    );
+  }
+
+  const response = await fetch(`${apiUrl.replace(/\/$/, '')}/api/temporal/v1/events`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-client-key': clientKey,
+      'x-client-pwd': clientPwd,
+    },
+    body: JSON.stringify({ eventName, eventKey, data: data || {} }),
+  });
+
+  if (!response.ok) {
+    // Throwing lets Temporal's activity retry policy handle a transient Reactory
+    // outage — which is exactly the behaviour we want for a notification.
+    const body = await response.text().catch(() => '');
+    throw new Error(`Reactory callback failed (${response.status}): ${body.slice(0, 300)}`);
+  }
+
+  const payload = (await response.json().catch(() => ({}))) as {
+    accepted?: boolean;
+    watchAcked?: boolean;
+  };
+  return { accepted: payload.accepted !== false, watchAcked: payload.watchAcked };
+}

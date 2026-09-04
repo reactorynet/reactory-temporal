@@ -1,0 +1,40 @@
+# Activates the Temporal event bridge when the workflow engine comes up.
+#
+# WHY a workflow at all: IReactoryModule has no boot hook and services are activated
+# lazily on first getService, so without this the bridge would only come to life when
+# a temporal step first ran — and a Temporal run that completed while the server was
+# down would sit unreconciled until then. An auto-start workflow is the mechanism the
+# platform provides for "do this once when the engine starts".
+#
+# WHY YAML rather than a code workflow: startAutoStartWorkflows raises the start event
+# with the workflow's BARE NAME. WorkflowRunner.startWorkflow matches that against
+# `w.name` and routes YAML definitions to startYamlWorkflow (which resolves the
+# definition from the matched record), whereas a CODE workflow is looked up on the
+# engine host by its fully-qualified class id and would not be found.
+#
+# It runs ONCE per server start (no props.interval): the bridge owns its own sweep
+# timer, so there is no need for a workflow instance per sweep tick.
+nameSpace: reactory-temporal
+name: TemporalBridgeBootstrap
+version: 1.0.0
+description: Activates the Temporal event bridge so pending completion watches are reconciled and swept.
+author: Reactory
+tags: [temporal, bridge, bootstrap]
+steps:
+  - id: startBridge
+    name: Start the Temporal event bridge
+    type: service_invoke
+    # A missing or misconfigured Temporal cluster must never stop the platform from
+    # starting, so a failure here is recorded and the run continues.
+    continueOnError: true
+    config:
+      service: reactory.TemporalEventBridgeService@1.0.0
+      method: start
+
+  - id: confirm
+    name: Log activation
+    type: log
+    dependsOn: startBridge
+    config:
+      message: "Temporal event bridge bootstrap complete"
+      level: info

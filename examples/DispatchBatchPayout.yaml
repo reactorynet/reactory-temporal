@@ -1,0 +1,67 @@
+# Durable Temporal await in a single step.
+#
+# The workflow starts a Temporal execution and SUSPENDS: no worker is held, no timer
+# polls, and the instance survives a server restart. When Temporal settles, the
+# TemporalEventBridgeService publishes `temporal.workflow.settled` keyed on the
+# workflowId and this instance resumes at the same step with the outcome.
+#
+# Run it with:
+#   mutation { startWorkflow(input: {
+#     workflow: "reactory-temporal-examples.DispatchBatchPayout@1.0.0"
+#     input: { batchId: "2026_001", accountId: "acc_acme_payroll_gbp" }
+#   }) { id } }
+nameSpace: reactory-temporal-examples
+name: DispatchBatchPayout
+version: 1.0.0
+description: Start a Temporal payout batch and durably await its outcome.
+author: Reactory
+tags: [temporal, durable, example]
+inputs:
+  batchId:
+    type: string
+    required: true
+    description: Business identifier for the batch — also the Temporal workflow id suffix
+  accountId:
+    type: string
+    required: true
+    description: Wallet-ledger account funding the batch
+  currency:
+    type: string
+    required: false
+    default: GBP
+steps:
+  - id: announce
+    name: Announce dispatch
+    type: log
+    config:
+      message: "Dispatching payout batch ${input.batchId} for ${input.accountId}"
+      level: info
+
+  - id: payout
+    name: Temporal payout batch
+    type: temporal_workflow
+    dependsOn: announce
+    config:
+      workflowType: B2BMassPayoutWorkflow
+      # Deterministic: an engine retry or a post-restart re-run re-attaches to this
+      # same execution instead of starting a second payout.
+      workflowId: "batch_${input.batchId}"
+      taskQueue: b2b-payouts-queue
+      awaitMode: event
+      # Delivered as an AWAIT_TIMEOUT outcome by the bridge, NOT as an engine
+      # effectiveDate (which would only delay event eligibility).
+      awaitTimeout: 604800000
+      resultPath: totalSettled
+      args:
+        - batchId: "${input.batchId}"
+          accountId: "${input.accountId}"
+          currency: "${input.currency}"
+          rows: "${variables.validatedRows}"
+
+  - id: report
+    name: Report outcome
+    type: log
+    dependsOn: payout
+    config:
+      message: "Batch ${input.batchId} finished: ${steps.payout.outputs.status} (settled ${steps.payout.outputs.result})"
+      level: info
