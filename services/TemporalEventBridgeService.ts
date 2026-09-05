@@ -556,7 +556,19 @@ export class TemporalEventBridgeService implements ITemporalEventBridge {
    * the safety net in that case.
    */
   private async verifyAck(watch: TemporalWorkflowWatchDocument): Promise<boolean> {
-    if (!watch.instanceId) return true;
+    if (!watch.instanceId) {
+      // Nothing to check against, so this counts as delivered — but say so loudly.
+      // An unverifiable delivery is exactly how a lost wake-up hides: the watch is
+      // marked acked on the first publish and the parked instance waits forever.
+      this.context.log(
+        `Temporal watch ${watch.workflowId} has no instanceId — publishing '${watch.eventName}' ` +
+          'without delivery verification. The waiting step will not be re-tried if this ' +
+          'publish does not match a subscription.',
+        { workflowId: watch.workflowId, eventKey: watch.eventKey },
+        'warn',
+      );
+      return true;
+    }
     try {
       const workflowService: any = this.context.getService(WORKFLOW_SERVICE_ID);
       const instance = await workflowService?.getWorkflowHistoryById(watch.instanceId);

@@ -360,7 +360,13 @@ export class TemporalWorkflowStep extends BaseTemporalStep {
         awaitTimeout: deps.awaitTimeout,
         instanceId: context.workflow?.instanceId,
         stepId: this.id,
-        clientKey: (context.reactoryContext?.partner as any)?.key,
+        // The ENGINE tenant of this instance, not the executing context's partner.
+        // Subscription matching is tenant-scoped, so publishing under the step
+        // context's partner would silently fail to wake anything whenever the two
+        // differ (they do: a workflow started without a partner runs under the
+        // engine's default tenant while the step executes under the system context).
+        clientKey:
+          (context.workflow as any)?.tenantId || (context.reactoryContext?.partner as any)?.key,
         userEmail: (context.reactoryContext?.user as any)?.email,
         maxResultBytes: deps.maxResultBytes,
       });
