@@ -121,7 +121,9 @@ steps:
       workflowId: "${steps.startPayout.outputs.workflowId}"
       signalName: approveBatch
       args:
-        - "${steps.awaitApproval.outputs.completedBy}"
+        # Prefer the readable identity for Temporal's audit history; both are stamped
+        # server-side from the authenticated approver, never from the UI payload.
+        - "${steps.awaitApproval.outputs.completedByEmail || steps.awaitApproval.outputs.completedBy}"
 
   # 5. Durably await settlement — again without holding a worker.
   - id: awaitSettlement
@@ -141,4 +143,4 @@ steps:
     dependsOn: awaitSettlement
     config:
       level: info
-      message: "Batch ${input.batchId}: ${steps.awaitSettlement.outputs.status}, settled ${steps.awaitSettlement.outputs.result} payouts (approved by ${steps.awaitApproval.outputs.completedBy})"
+      message: "Batch ${input.batchId}: ${steps.awaitSettlement.outputs.status}, settled ${steps.awaitSettlement.outputs.result} payouts (approved by ${steps.awaitApproval.outputs.completedByEmail || steps.awaitApproval.outputs.completedBy})"
