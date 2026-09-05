@@ -487,6 +487,20 @@ export class TemporalEventBridgeService implements ITemporalEventBridge {
     watch: TemporalWorkflowWatchDocument,
     extra: Record<string, any> = {},
   ): Promise<boolean> {
+    // On a RETRY, check delivery before publishing again. The first attempt's
+    // verification races the engine: the event queue may not have seeded the waiting
+    // pointer yet, so the watch is left unacked even though delivery succeeded.
+    // Re-publishing then delivers the same outcome twice — harmless (the second is
+    // dropped for want of a subscription) but avoidable, and a duplicate event is a
+    // real hazard for a step that suspends more than once on the same topic.
+    if ((watch.attempts || 0) > 0 && (await this.verifyAck(watch))) {
+      watch.status = 'acked';
+      watch.ackedAt = new Date();
+      watch.lastError = undefined;
+      await watch.save();
+      return true;
+    }
+
     watch.attempts = (watch.attempts || 0) + 1;
     watch.lastAttemptAt = new Date();
 

@@ -283,6 +283,33 @@ describe('TemporalEventBridgeService', () => {
       expect(mockStore[0].status).toBe('acked');
     });
 
+    it('acks a retry without re-publishing when the event was already consumed', async () => {
+      const workflow = fakeWorkflowService({ waitingPointers: stillWaiting });
+      const service = makeService(fakeTemporalService(), workflow);
+
+      await service.watch({ workflowId: 'batch_1', instanceId: 'instance-1' });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(mockStore[0].status).toBe('settled');
+      const publishesAfterFirstAttempt = workflow.publishWorkflowEvent.mock.calls.length;
+
+      // The first verification raced the engine; by the sweep the pointer HAS
+      // consumed the event.
+      workflow.getWorkflowHistoryById = jest.fn(async () => ({
+        id: 'instance-1',
+        tenantId: 'acme',
+        executionPointers: consumed,
+      }));
+      mockStore[0].lastAttemptAt = new Date(Date.now() - 60 * 60 * 1000);
+
+      const report = await service.sweep();
+
+      expect(report.acked).toBe(1);
+      expect(mockStore[0].status).toBe('acked');
+      // Delivery is confirmed, so the outcome must NOT be published a second time.
+      expect(workflow.publishWorkflowEvent.mock.calls.length).toBe(publishesAfterFirstAttempt);
+      expect(mockStore[0].attempts).toBe(1);
+    });
+
     it('abandons delivery after the attempt budget is exhausted', async () => {
       const workflow = fakeWorkflowService({ waitingPointers: stillWaiting });
       const service = makeService(fakeTemporalService(), workflow);
