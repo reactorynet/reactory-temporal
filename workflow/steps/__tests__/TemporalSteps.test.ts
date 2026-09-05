@@ -191,6 +191,59 @@ describe('temporal_workflow', () => {
       expect(temporal.awaitOutcome).not.toHaveBeenCalled();
     });
 
+    it('passes non-scalar arguments to Temporal with their type intact', async () => {
+      const temporal = fakeTemporal();
+      const rows = [
+        { rowId: '1', amount: 3200, beneficiaryName: 'Sarah Jenkins' },
+        { rowId: '2', amount: 2850, beneficiaryName: 'Alex Thorne' },
+      ];
+      const step = new TemporalWorkflowStep('payout', {
+        workflowType: 'W',
+        workflowId: 'batch_${input.batchId}',
+        awaitMode: 'none',
+        args: [
+          {
+            batchId: '${input.batchId}',
+            rows: '${input.rows}',
+            limits: '${variables.limits}',
+            label: 'batch ${input.batchId}',
+          },
+        ],
+      });
+
+      await step.execute(
+        makeContext({
+          temporal,
+          inputs: { batchId: '2026_001', rows },
+          variables: { limits: { max: 10 } },
+        }),
+      );
+
+      const [arg] = temporal.startWorkflow.mock.calls[0][0].args;
+      // A whole-value reference keeps its type — the Temporal workflow does
+      // input.rows.reduce(...), which would throw on a JSON string.
+      expect(arg.rows).toEqual(rows);
+      expect(Array.isArray(arg.rows)).toBe(true);
+      expect(arg.limits).toEqual({ max: 10 });
+      // Mixed content still interpolates to a string.
+      expect(arg.label).toBe('batch 2026_001');
+      expect(arg.batchId).toBe('2026_001');
+    });
+
+    it('leaves an unresolved argument reference as its literal token', async () => {
+      const temporal = fakeTemporal();
+      const step = new TemporalWorkflowStep('payout', {
+        workflowType: 'W',
+        workflowId: 'batch_1',
+        awaitMode: 'none',
+        args: [{ rows: '${input.rows}' }],
+      });
+      await step.execute(makeContext({ temporal, inputs: {} }));
+      // Unresolved tokens pass through so the optional-value handling elsewhere can
+      // still tell "not supplied" from "supplied as empty".
+      expect(temporal.startWorkflow.mock.calls[0][0].args[0].rows).toBe('${input.rows}');
+    });
+
     it('reports reattached when Temporal adopted an existing run', async () => {
       const temporal = fakeTemporal({
         startWorkflow: jest.fn().mockImplementation(async (input: any) => ({

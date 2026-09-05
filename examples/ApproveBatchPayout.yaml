@@ -1,17 +1,21 @@
 # Human-in-the-loop across BOTH engines.
 #
-# Reactory owns the approval experience; Temporal owns the money. The flow:
-#   1. start the Temporal batch (fire-and-forget) — it runs screening + reservation
-#      and then parks on its own `await condition(() => isApproved)`
-#   2. suspend the Reactory instance until an operator approves (a core wait_event —
-#      publish `payout.approval` keyed on the batch id to release it)
+# Reactory owns the approval experience; Temporal owns the money:
+#   1. start the Temporal batch (fire-and-forget) — it screens, reserves funds and
+#      then parks on its own `await condition(() => isApproved)`
+#   2. Reactory reads the live Temporal state and SUSPENDS until an operator approves
 #   3. signal Temporal so its approval gate opens
 #   4. durably await the final outcome
 #
-# Approve with:
-#   mutation { publishWorkflowEvent(eventName: "payout.approval",
-#                                   eventKey: "2026_001",
-#                                   eventData: { approverId: "user_checker_werner" }) { success } }
+# Run it (CLI):
+#   reactory workflow start reactory-temporal-examples.ApproveBatchPayout@1.0.0 \
+#     --input='{"batchId":"2026_002"}'
+#   reactory workflow get <instanceId>            # shows the step waiting for approval
+#   reactory workflow continue <instanceId> \
+#     --event=payout.approval --event-key=2026_002 \
+#     --event-data='{"approverId":"user_checker_werner"}'
+#
+# Requires: a Temporal cluster and a worker serving `b2b-payouts-queue`.
 nameSpace: reactory-temporal-examples
 name: ApproveBatchPayout
 version: 1.0.0
@@ -24,12 +28,29 @@ inputs:
     required: true
   accountId:
     type: string
-    required: true
+    required: false
+    default: acc_acme_payroll_gbp
   currency:
     type: string
     required: false
     default: GBP
+  rows:
+    type: array
+    required: false
+    description: Payout rows. Defaults to a small sample so the workflow is runnable as-is.
+    default:
+      - rowId: "1"
+        beneficiaryName: Sarah Jenkins
+        accountNumber: GB82WEST12345678901234
+        amount: 3200
+        currency: GBP
+      - rowId: "2"
+        beneficiaryName: Alex Thorne
+        accountNumber: GB29NWBK60161331926819
+        amount: 2850
+        currency: GBP
 steps:
+  # 1. Start the Temporal execution and continue — it will park on its own gate.
   - id: startPayout
     name: Start Temporal batch
     type: temporal_workflow
@@ -42,17 +63,41 @@ steps:
         - batchId: "${input.batchId}"
           accountId: "${input.accountId}"
           currency: "${input.currency}"
-          rows: "${variables.validatedRows}"
+          rows: "${input.rows}"
 
+  # 2. Read the batch's live state straight out of the running Temporal workflow —
+  #    a Query, so it costs nothing and cannot affect the execution.
+  - id: batchProgress
+    name: Read Temporal batch progress
+    type: temporal_query
+    dependsOn: startPayout
+    # A worker may not have picked the run up yet, and a Query against a run with no
+    # poller fails. Step-level, not config: continueOnError is engine behaviour.
+    continueOnError: true
+    config:
+      workflowId: "${steps.startPayout.outputs.workflowId}"
+      queryType: getBatchProgress
+
+  - id: requestApproval
+    name: Announce the approval gate
+    type: log
+    dependsOn: batchProgress
+    config:
+      level: info
+      message: "Batch ${input.batchId} awaiting checker approval (publish payout.approval / key ${input.batchId})"
+
+  # 3. Reactory's own durable gate: the instance suspends here until an operator
+  #    publishes `payout.approval` with this batch id as the correlation key.
   - id: awaitApproval
     name: Await checker approval
     type: wait_event
-    dependsOn: startPayout
+    dependsOn: requestApproval
     config:
       eventName: payout.approval
       eventKey: "input.batchId"
       outputVariable: approval
 
+  # 4. Release Temporal's gate with the approver Reactory captured.
   - id: approveInTemporal
     name: Release the Temporal approval gate
     type: temporal_signal
@@ -61,8 +106,9 @@ steps:
       workflowId: "${steps.startPayout.outputs.workflowId}"
       signalName: approveBatch
       args:
-        - "${approval.approverId}"
+        - "${variables.approval.approverId}"
 
+  # 5. Durably await settlement — again without holding a worker.
   - id: awaitSettlement
     name: Await settlement
     type: temporal_await
@@ -72,11 +118,12 @@ steps:
       awaitMode: event
       awaitTimeout: 86400000
       resultPath: totalSettled
+      failOnWorkflowFailure: false
 
   - id: report
     name: Report settlement
     type: log
     dependsOn: awaitSettlement
     config:
-      message: "Batch ${input.batchId} settled ${steps.awaitSettlement.outputs.result} payouts (status ${steps.awaitSettlement.outputs.status})"
       level: info
+      message: "Batch ${input.batchId}: ${steps.awaitSettlement.outputs.status}, settled ${steps.awaitSettlement.outputs.result} payouts (approved by ${variables.approval.approverId})"

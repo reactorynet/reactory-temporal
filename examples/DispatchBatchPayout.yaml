@@ -1,19 +1,28 @@
 # Durable Temporal await in a single step.
 #
-# The workflow starts a Temporal execution and SUSPENDS: no worker is held, no timer
-# polls, and the instance survives a server restart. When Temporal settles, the
-# TemporalEventBridgeService publishes `temporal.workflow.settled` keyed on the
-# workflowId and this instance resumes at the same step with the outcome.
+# Reactory validates and summarises the batch, hands execution to Temporal, and then
+# SUSPENDS: no worker is held, no timer polls, and the instance survives a server
+# restart. When Temporal settles, TemporalEventBridgeService publishes
+# `temporal.workflow.settled` keyed on the workflowId and this instance resumes at the
+# same step with the outcome.
 #
-# Run it with:
-#   mutation { startWorkflow(input: {
-#     workflow: "reactory-temporal-examples.DispatchBatchPayout@1.0.0"
-#     input: { batchId: "2026_001", accountId: "acc_acme_payroll_gbp" }
-#   }) { id } }
+# B2BMassPayoutWorkflow contains a maker/checker gate (`await condition(() => isApproved)`),
+# so this sample delivers the approval AT START via signalWithStart — one atomic call,
+# no race between "is it running?" and the signal. That makes the run settle on its own,
+# which is what this sample is demonstrating. For the human-in-the-loop variant where a
+# real operator approves, see ApproveBatchPayout.yaml.
+#
+# Run it (CLI):
+#   reactory workflow start reactory-temporal-examples.DispatchBatchPayout@1.0.0 \
+#     --input='{"batchId":"2026_001"}'
+#   reactory workflow get <instanceId> --logs
+#
+# Requires: a Temporal cluster on $TEMPORAL_ADDRESS and a worker serving
+# `b2b-payouts-queue` (npx ts-node src/modules/reactory-temporal/workflows/worker.ts).
 nameSpace: reactory-temporal-examples
 name: DispatchBatchPayout
 version: 1.0.0
-description: Start a Temporal payout batch and durably await its outcome.
+description: Validate a payout batch, dispatch it to Temporal, and durably await settlement.
 author: Reactory
 tags: [temporal, durable, example]
 inputs:
@@ -23,20 +32,78 @@ inputs:
     description: Business identifier for the batch — also the Temporal workflow id suffix
   accountId:
     type: string
-    required: true
+    required: false
+    default: acc_acme_payroll_gbp
     description: Wallet-ledger account funding the batch
   currency:
     type: string
     required: false
     default: GBP
+  approverId:
+    type: string
+    required: false
+    default: system_auto_approver
+    description: Recorded as the checker on the Temporal side (this sample self-approves)
+  rows:
+    type: array
+    required: false
+    description: Payout rows. Defaults to a small sample so the workflow is runnable as-is.
+    default:
+      - rowId: "1"
+        beneficiaryName: Sarah Jenkins
+        accountNumber: GB82WEST12345678901234
+        amount: 3200
+        currency: GBP
+      - rowId: "2"
+        beneficiaryName: Alex Thorne
+        accountNumber: GB29NWBK60161331926819
+        amount: 2850
+        currency: GBP
 steps:
+  # 1. Reject an unusable batch before anything durable or costly happens.
+  - id: validateBatch
+    name: Validate batch inputs
+    type: validation
+    config:
+      stopOnFirstError: true
+      rules:
+        - field: "${input.batchId}"
+          type: required
+          message: batchId is required
+        - field: "${input.accountId}"
+          type: required
+          message: accountId is required
+        - field: "${input.currency}"
+          type: pattern
+          value: "^[A-Z]{3}$"
+          message: currency must be a 3-letter ISO code
+
+  # 2. Summarise the batch in Reactory. `input` is a whole-value reference, so the
+  #    rows arrive as an array rather than JSON text.
+  - id: summariseBatch
+    name: Summarise rows
+    type: data_transformation
+    dependsOn: validateBatch
+    config:
+      input: "${input.rows}"
+      outputVariable: batchSummary
+      transformations:
+        - type: aggregate
+          config:
+            operations:
+              rowCount: { type: count }
+              totalAmount: { type: sum, field: amount }
+              largestPayout: { type: max, field: amount }
+
   - id: announce
     name: Announce dispatch
     type: log
+    dependsOn: summariseBatch
     config:
-      message: "Dispatching payout batch ${input.batchId} for ${input.accountId}"
       level: info
+      message: "Dispatching batch ${input.batchId}: ${variables.batchSummary.rowCount} rows, ${variables.batchSummary.totalAmount} ${input.currency}"
 
+  # 3. Hand execution to Temporal and suspend until it settles.
   - id: payout
     name: Temporal payout batch
     type: temporal_workflow
@@ -44,7 +111,7 @@ steps:
     config:
       workflowType: B2BMassPayoutWorkflow
       # Deterministic: an engine retry or a post-restart re-run re-attaches to this
-      # same execution instead of starting a second payout.
+      # execution instead of starting a second payout.
       workflowId: "batch_${input.batchId}"
       taskQueue: b2b-payouts-queue
       awaitMode: event
@@ -52,16 +119,23 @@ steps:
       # effectiveDate (which would only delay event eligibility).
       awaitTimeout: 604800000
       resultPath: totalSettled
+      # Let the workflow finish either way so the report step can branch on status.
+      failOnWorkflowFailure: false
+      # Atomically start-and-signal: releases the batch's checker gate immediately.
+      signalOnStart:
+        name: approveBatch
+        args:
+          - "${input.approverId}"
       args:
         - batchId: "${input.batchId}"
           accountId: "${input.accountId}"
           currency: "${input.currency}"
-          rows: "${variables.validatedRows}"
+          rows: "${input.rows}"
 
   - id: report
     name: Report outcome
     type: log
     dependsOn: payout
     config:
-      message: "Batch ${input.batchId} finished: ${steps.payout.outputs.status} (settled ${steps.payout.outputs.result})"
       level: info
+      message: "Batch ${input.batchId} finished: ${steps.payout.outputs.status} (settled ${steps.payout.outputs.result} of ${variables.batchSummary.rowCount})"

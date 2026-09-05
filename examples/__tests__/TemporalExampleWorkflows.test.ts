@@ -12,6 +12,7 @@
  */
 
 import { join } from 'path';
+import { readFileSync } from 'fs';
 import { YamlFlowParser } from '@reactory/server-modules/reactory-core/workflow/YamlFlow/YamlFlowParser';
 import { YamlStepRegistry } from '@reactory/server-modules/reactory-core/workflow/YamlFlow/steps/registry/YamlStepRegistry';
 import { workflowSteps } from '../../workflow/steps';
@@ -135,11 +136,19 @@ describe('example YAML workflows', () => {
     const types = result.workflow!.steps.map((step: any) => step.type);
     expect(types).toEqual([
       'temporal_workflow',
+      'temporal_query',
+      'log',
       'wait_event',
       'temporal_signal',
       'temporal_await',
       'log',
     ]);
+
+    // continueOnError is a STEP-level property, not step config — the engine reads it
+    // off the definition to decide whether a failure stops the run.
+    const query = result.workflow!.steps.find((step: any) => step.type === 'temporal_query');
+    expect(query).toMatchObject({ continueOnError: true });
+    expect((query as any).config.continueOnError).toBeUndefined();
   });
 
   it('parses the bridge bootstrap workflow', () => {
@@ -153,6 +162,30 @@ describe('example YAML workflows', () => {
       type: 'service_invoke',
       continueOnError: true,
     });
+  });
+
+  /**
+   * Guard against a template that silently never resolves.
+   *
+   * BaseYamlStep resolves a BARE name only as a whole-variable reference: `${approval}`
+   * finds the variable, `${approval.approverId}` does not — a dotted path must be
+   * rooted at variables./input./steps./env., otherwise the token is passed through
+   * verbatim and lands in Temporal (or a log line) as the literal text "${...}".
+   * That failure is invisible until the workflow runs, so pin it here.
+   */
+  it.each([
+    ['DispatchBatchPayout.yaml', EXAMPLES_DIR],
+    ['ApproveBatchPayout.yaml', EXAMPLES_DIR],
+    ['TemporalBridgeBootstrap.yaml', WORKFLOWS_DIR],
+  ])('uses only resolvable template roots in %s', (filename, dir) => {
+    const source = readFileSync(join(dir, filename), 'utf8');
+    const tokens = source.match(/\$\{[^}]+\}/g) || [];
+    const unrooted = tokens.filter((token) => {
+      const expression = token.slice(2, -1).split('||')[0].trim();
+      if (!expression.includes('.')) return false; // bare whole-variable reference
+      return !/^(input|inputs|variables|steps|env|process\.env)\./.test(expression);
+    });
+    expect(unrooted).toEqual([]);
   });
 
   it('builds a durable engine class from the example definition', () => {

@@ -111,9 +111,18 @@ export abstract class BaseTemporalStep extends BaseYamlStep {
     return this.resolveTemplate(value, context);
   }
 
-  /** Deep-resolve `${...}` templates inside strings, arrays and plain objects. */
+  /**
+   * Deep-resolve `${...}` templates inside strings, arrays and plain objects,
+   * PRESERVING TYPE for whole-value references.
+   *
+   * This matters for Temporal arguments specifically: they are data handed to a
+   * workflow function, not text. `rows: "${input.rows}"` must arrive as an array —
+   * plain template resolution would JSON-stringify it and the workflow's
+   * `input.rows.reduce(...)` would throw inside Temporal, where the failure is far
+   * from its cause. Mixed content ("batch_${input.id}") still interpolates.
+   */
   protected resolveDeep(value: any, context: StepExecutionContext): any {
-    if (typeof value === 'string') return this.resolveTemplate(value, context);
+    if (typeof value === 'string') return this.resolveTemplateValue(value, context);
     if (Array.isArray(value)) return value.map((entry) => this.resolveDeep(entry, context));
     if (value && typeof value === 'object') {
       const out: Record<string, any> = {};
