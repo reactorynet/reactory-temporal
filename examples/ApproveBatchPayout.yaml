@@ -3,7 +3,8 @@
 # Reactory owns the approval experience; Temporal owns the money:
 #   1. start the Temporal batch (fire-and-forget) — it screens, reserves funds and
 #      then parks on its own `await condition(() => isApproved)`
-#   2. Reactory reads the live Temporal state and SUSPENDS until an operator approves
+#   2. Reactory reads the live Temporal state, raises an APPROVAL TASK for a user and
+#      SUSPENDS until they action it in the UI
 #   3. signal Temporal so its approval gate opens
 #   4. durably await the final outcome
 #
@@ -11,9 +12,14 @@
 #   reactory workflow start reactory-temporal-examples.ApproveBatchPayout@1.0.0 \
 #     --input='{"batchId":"2026_002"}'
 #   reactory workflow get <instanceId>            # shows the step waiting for approval
+#
+# Approve it in the UI: the task appears in the user's queue (userWorkflowTasks),
+# renders as core.WorkflowTaskApproval@1.0.0, and approving calls the
+# completeWorkflowTask mutation — which publishes workflow.task.completed keyed on
+# the task id and resumes this instance. To approve from the CLI instead:
 #   reactory workflow continue <instanceId> \
-#     --event=payout.approval --event-key=2026_002 \
-#     --event-data='{"approverId":"user_checker_werner"}'
+#     --event=workflow.task.completed --event-key=<taskId> \
+#     --event-data='{"approved":true,"approverId":"user_checker_werner"}'
 #
 # Requires: a Temporal cluster and a worker serving `b2b-payouts-queue`.
 nameSpace: reactory-temporal-examples
@@ -34,6 +40,12 @@ inputs:
     type: string
     required: false
     default: GBP
+  approverEmail:
+    type: string
+    required: false
+    description: >-
+      Checker who must approve. Accepts a user id or an email address; when omitted
+      the task falls to the user who started the workflow.
   rows:
     type: array
     required: false
@@ -78,24 +90,27 @@ steps:
       workflowId: "${steps.startPayout.outputs.workflowId}"
       queryType: getBatchProgress
 
-  - id: requestApproval
-    name: Announce the approval gate
-    type: log
-    dependsOn: batchProgress
-    config:
-      level: info
-      message: "Batch ${input.batchId} awaiting checker approval (publish payout.approval / key ${input.batchId})"
-
-  # 3. Reactory's own durable gate: the instance suspends here until an operator
-  #    publishes `payout.approval` with this batch id as the correlation key.
+  # 3. Reactory's own durable gate. This raises a Task for the checker — it shows up
+  #    in their queue in the UI, rendered by the component named in `fqn` — and the
+  #    instance suspends until they complete it. The wake-up is correlated by task id,
+  #    so a named step and several concurrent tasks are all unambiguous.
   - id: awaitApproval
     name: Await checker approval
-    type: wait_event
-    dependsOn: requestApproval
+    type: user_activity
+    dependsOn: batchProgress
     config:
-      eventName: payout.approval
-      eventKey: "input.batchId"
-      outputVariable: approval
+      activityType: approval
+      assignee: "${input.approverEmail}"
+      message: "Approve payout batch ${input.batchId} — ${steps.batchProgress.outputs.result.totalAmount} ${input.currency}"
+      fqn: core.WorkflowTaskApproval@1.0.0
+      # Static props merged with values pulled from workflow state, so the approval
+      # card shows the operator what they are actually approving.
+      props:
+        category: Mass payout
+      propsMap:
+        amount: steps.batchProgress.outputs.result.totalAmount
+        currency: input.currency
+        vendor: input.accountId
 
   # 4. Release Temporal's gate with the approver Reactory captured.
   - id: approveInTemporal
@@ -106,7 +121,7 @@ steps:
       workflowId: "${steps.startPayout.outputs.workflowId}"
       signalName: approveBatch
       args:
-        - "${variables.approval.approverId}"
+        - "${steps.awaitApproval.outputs.completedBy}"
 
   # 5. Durably await settlement — again without holding a worker.
   - id: awaitSettlement
@@ -126,4 +141,4 @@ steps:
     dependsOn: awaitSettlement
     config:
       level: info
-      message: "Batch ${input.batchId}: ${steps.awaitSettlement.outputs.status}, settled ${steps.awaitSettlement.outputs.result} payouts (approved by ${variables.approval.approverId})"
+      message: "Batch ${input.batchId}: ${steps.awaitSettlement.outputs.status}, settled ${steps.awaitSettlement.outputs.result} payouts (approved by ${steps.awaitApproval.outputs.completedBy})"

@@ -121,7 +121,7 @@ describe('example YAML workflows', () => {
     expect(validation.valid).toBe(true);
   });
 
-  it('validates ApproveBatchPayout, including its wait_event + signal handshake', async () => {
+  it('validates ApproveBatchPayout, including its approval-task + signal handshake', async () => {
     const result = parser.parseFromFile(join(EXAMPLES_DIR, 'ApproveBatchPayout.yaml'));
     expect(result.success).toBe(true);
 
@@ -137,12 +137,20 @@ describe('example YAML workflows', () => {
     expect(types).toEqual([
       'temporal_workflow',
       'temporal_query',
-      'log',
-      'wait_event',
+      // The human gate is a user_activity, not a raw wait_event: it raises a Task
+      // that appears in the approver's UI queue and suspends on that task's id.
+      'user_activity',
       'temporal_signal',
       'temporal_await',
       'log',
     ]);
+
+    const gate = result.workflow!.steps.find((step: any) => step.type === 'user_activity');
+    expect((gate as any).config).toMatchObject({
+      activityType: 'approval',
+      // Registered in the PWA component registry as core.WorkflowTaskApproval@1.0.0.
+      fqn: 'core.WorkflowTaskApproval@1.0.0',
+    });
 
     // continueOnError is a STEP-level property, not step config — the engine reads it
     // off the definition to decide whether a failure stops the run.
